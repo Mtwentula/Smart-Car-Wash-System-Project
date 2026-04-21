@@ -1,0 +1,42 @@
+server:
+  port: 8082
+  servlet:
+    context-path: /api/v1
+
+spring:
+  application:
+    name: client-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/int216d_carwash}
+    username: ${DB_USER:dev}
+    password: ${DB_PASSWORD:dev}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: client_schema
+        jdbc.time_zone: UTC
+    open-in-view: false
+  flyway:
+    enabled: true
+    schemas: client_schema
+    default-schema: client_schema
+    locations: classpath:db/migration
+    create-schemas: true
+
+jwt:
+  secret: ${JWT_SECRET:int216d-super-secret-key-change-in-production-must-be-at-least-256-bits-long}
+  access-expiry-ms: ${JWT_ACCESS_EXPIRY_MS:900000}
+  refresh-expiry-ms: ${JWT_REFRESH_EXPIRY_MS:604800000}
+  issuer: int216d-auth
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    za.co.int216d: INFO
