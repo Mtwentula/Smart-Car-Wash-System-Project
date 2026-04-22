@@ -6,8 +6,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class JwtProperties {
 
     private String secret;
-    private long accessExpiryMs = 900_000L;     // 15 minutes
-    private long refreshExpiryMs = 604_800_000L; // 7 days
+    private long accessExpiryMs = 900_000L;
+    private long refreshExpiryMs = 604_800_000L;
     private String issuer = "int216d-carwash";
 
     public String getSecret() { return secret; }

@@ -23,6 +23,8 @@ target/
 
 ### Env ###
 .env
+.env.*
+.env.example
 *.local
 
 ### Logs ###

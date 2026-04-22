@@ -33,12 +33,12 @@ All services use the same base URL shape described in the project doc:
 
 ## Environment
 
-Copy `.env.example` to `.env` and tweak as needed. Key settings:
+Create `.env` and set values as needed. Key settings:
 
 | Variable | Default (dev) | Notes |
 |---|---|---|
 | `DB_URL` | `jdbc:postgresql://localhost:5432/int216d_carwash` | Single DB, four schemas |
-| `JWT_SECRET` | `int216d-super-secret-key-...` | **Change in production.** Min 32 chars. |
+| `JWT_SECRET` | `CHANGE_ME_TO_A_LONG_RANDOM_SECRET_MIN_32_BYTES` | **Change in production.** Min 32 chars. |
 | `MAIL_HOST` / `MAIL_PORT` | `localhost` / `1025` | MailHog UI at http://localhost:8025 |
 
 ## Endpoints Live After Task 1-3

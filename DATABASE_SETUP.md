@@ -17,7 +17,7 @@ Everything you need to create, connect to, and verify the project database.
 | **JDBC URL** | `jdbc:postgresql://localhost:5432/int216d_carwash` |
 | **Schemas inside the DB** | `auth_schema`, `client_schema`, `booking_schema`, `membership_schema` |
 
-These match the defaults baked into every service's `application.yml` and `.env.example`. Change them in one place (`.env`) and all services pick them up.
+These match the defaults baked into every service's `application.yml`. Change them in one place (`.env`) and all services pick them up.
 
 ---
 
@@ -139,10 +139,10 @@ After you start `auth-service` and `client-service` for the first time, Flyway w
 
 ## 6. Environment overrides (no secrets in git)
 
-Copy `.env.example` to `.env` and change values there. The services read these variables at boot:
+Create `.env` and change values there. The services read these variables at boot:
 
 ```bash
-cp .env.example .env
+touch .env
 ```
 
 ```env
