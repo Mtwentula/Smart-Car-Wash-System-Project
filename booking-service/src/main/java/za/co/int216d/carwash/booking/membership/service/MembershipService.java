@@ -1,0 +1,336 @@
+package za.co.int216d.carwash.booking.membership.service;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import za.co.int216d.carwash.booking.membership.domain.Membership;
+import za.co.int216d.carwash.booking.membership.domain.MembershipCreditLog;
+import za.co.int216d.carwash.booking.membership.domain.MembershipPlan;
+import za.co.int216d.carwash.booking.membership.dto.MembershipDetailResponse;
+import za.co.int216d.carwash.booking.membership.dto.MembershipPlanResponse;
+import za.co.int216d.carwash.booking.membership.dto.SubscribeMembershipRequest;
+import za.co.int216d.carwash.booking.membership.repository.MembershipCreditLogRepository;
+import za.co.int216d.carwash.booking.membership.repository.MembershipPlanRepository;
+import za.co.int216d.carwash.booking.membership.repository.MembershipRepository;
+import za.co.int216d.carwash.booking.notification.producer.MembershipEventProducer;
+import za.co.int216d.carwash.common.exception.BadRequestException;
+import za.co.int216d.carwash.common.exception.ResourceNotFoundException;
+
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
+
+/**
+ * Service for managing client memberships and subscriptions
+ */
+@Service
+@Slf4j
+@Transactional
+public class MembershipService {
+
+    private final MembershipRepository membershipRepository;
+    private final MembershipPlanRepository planRepository;
+    private final MembershipCreditLogRepository creditLogRepository;
+    private final MembershipEventProducer eventProducer;
+
+    public MembershipService(
+        MembershipRepository membershipRepository,
+        MembershipPlanRepository planRepository,
+        MembershipCreditLogRepository creditLogRepository,
+        MembershipEventProducer eventProducer
+    ) {
+        this.membershipRepository = membershipRepository;
+        this.planRepository = planRepository;
+        this.creditLogRepository = creditLogRepository;
+        this.eventProducer = eventProducer;
+    }
+
+    /**
+     * Subscribe a client to a membership plan
+     */
+    public MembershipDetailResponse subscribeToPlan(Long clientId, SubscribeMembershipRequest request) {
+        log.info("Client {} subscribing to plan {}", clientId, request.getPlanId());
+
+        // Check if client already has an active membership
+        membershipRepository.findByClientId(clientId)
+            .ifPresent(existing -> {
+                if (existing.getStatus() == Membership.MembershipStatus.ACTIVE) {
+                    throw new BadRequestException("Client already has an active membership. Cancel it first.");
+                }
+            });
+
+        // Get the plan
+        MembershipPlan plan = planRepository.findById(request.getPlanId())
+            .orElseThrow(() -> new ResourceNotFoundException("Membership plan not found with ID: " + request.getPlanId()));
+
+        if (!plan.getIsActive()) {
+            throw new BadRequestException("Membership plan is no longer active");
+        }
+
+        // Create new membership
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime expiryDate = now.plusMonths(1);
+
+        Membership membership = Membership.builder()
+            .clientId(clientId)
+            .plan(plan)
+            .status(Membership.MembershipStatus.ACTIVE)
+            .startDate(now)
+            .expiryDate(expiryDate)
+            .creditsRemaining(plan.getCreditsPerMonth())
+            .washesUsedThisMonth(0)
+            .autoRenew(request.getAutoRenew())
+            .build();
+
+        membership = membershipRepository.save(membership);
+
+        // Log the initial allocation
+        MembershipCreditLog creditLog = MembershipCreditLog.builder()
+            .membership(membership)
+            .type(MembershipCreditLog.TransactionType.MONTHLY_ALLOCATION)
+            .creditsChanged(plan.getCreditsPerMonth())
+            .balanceBefore(0)
+            .balanceAfter(plan.getCreditsPerMonth())
+            .description("Initial monthly allocation for " + plan.getName() + " plan")
+            .build();
+
+        creditLogRepository.save(creditLog);
+        log.info("Client {} subscribed to plan {}", clientId, plan.getName());
+
+        // Publish subscription event
+        eventProducer.publishSubscriptionEvent(clientId, plan.getId(), plan.getName(), null, null);
+
+        return mapToDetailResponse(membership);
+    }
+
+    /**
+     * Get client's current membership
+     */
+    @Transactional(readOnly = true)
+    public MembershipDetailResponse getClientMembership(Long clientId) {
+        Membership membership = membershipRepository.findByClientId(clientId)
+            .orElseThrow(() -> new ResourceNotFoundException("No membership found for client ID: " + clientId));
+
+        // Check if expired
+        if (membership.getStatus() == Membership.MembershipStatus.ACTIVE &&
+            membership.getExpiryDate().isBefore(LocalDateTime.now())) {
+            membership.setStatus(Membership.MembershipStatus.EXPIRED);
+            membership = membershipRepository.save(membership);
+        }
+
+        return mapToDetailResponse(membership);
+    }
+
+    /**
+     * Renew a client's membership for another month
+     */
+    public MembershipDetailResponse renewMembership(Long clientId) {
+        log.info("Renewing membership for client {}", clientId);
+
+        Membership membership = membershipRepository.findByClientId(clientId)
+            .orElseThrow(() -> new ResourceNotFoundException("No membership found for client ID: " + clientId));
+
+        MembershipPlan plan = membership.getPlan();
+
+        // Update expiry and reset credits
+        LocalDateTime newExpiryDate = LocalDateTime.now().plusMonths(1);
+        membership.setExpiryDate(newExpiryDate);
+        membership.setCreditsRemaining(plan.getCreditsPerMonth());
+        membership.setWashesUsedThisMonth(0);
+        membership.setStatus(Membership.MembershipStatus.ACTIVE);
+
+        membership = membershipRepository.save(membership);
+
+        // Log the monthly allocation
+        MembershipCreditLog creditLog = MembershipCreditLog.builder()
+            .membership(membership)
+            .type(MembershipCreditLog.TransactionType.MONTHLY_ALLOCATION)
+            .creditsChanged(plan.getCreditsPerMonth())
+            .balanceBefore(0)
+            .balanceAfter(plan.getCreditsPerMonth())
+            .description("Monthly allocation for renewal - " + plan.getName() + " plan")
+            .build();
+
+        creditLogRepository.save(creditLog);
+        log.info("Membership renewed for client {}", clientId);
+
+        // Publish renewal event
+        eventProducer.publishRenewalEvent(clientId, plan.getId(), plan.getName(), null, null);
+
+        return mapToDetailResponse(membership);
+    }
+
+    /**
+     * Upgrade to a different plan
+     */
+    public MembershipDetailResponse upgradePlan(Long clientId, Long newPlanId) {
+        log.info("Upgrading membership for client {} to plan {}", clientId, newPlanId);
+
+        Membership membership = membershipRepository.findByClientId(clientId)
+            .orElseThrow(() -> new ResourceNotFoundException("No membership found for client ID: " + clientId));
+
+        MembershipPlan newPlan = planRepository.findById(newPlanId)
+            .orElseThrow(() -> new ResourceNotFoundException("Membership plan not found with ID: " + newPlanId));
+
+        if (!newPlan.getIsActive()) {
+            throw new BadRequestException("Target membership plan is no longer active");
+        }
+
+        // Update membership
+        membership.setPlan(newPlan);
+        membership.setCreditsRemaining(newPlan.getCreditsPerMonth());
+        membership.setWashesUsedThisMonth(0);
+
+        membership = membershipRepository.save(membership);
+        log.info("Membership upgraded for client {}", clientId);
+
+        return mapToDetailResponse(membership);
+    }
+
+    /**
+     * Cancel a client's membership
+     */
+    public void cancelMembership(Long clientId) {
+        log.info("Cancelling membership for client {}", clientId);
+
+        Membership membership = membershipRepository.findByClientId(clientId)
+            .orElseThrow(() -> new ResourceNotFoundException("No membership found for client ID: " + clientId));
+
+        membership.setStatus(Membership.MembershipStatus.CANCELLED);
+        membershipRepository.save(membership);
+        log.info("Membership cancelled for client {}", clientId);
+
+        // Publish cancellation event
+        eventProducer.publishCancellationEvent(clientId, membership.getPlan().getId(), 
+            membership.getPlan().getName(), null, null);
+    }
+
+    /**
+     * Suspend a membership (Admin only)
+     */
+    public void suspendMembership(Long clientId) {
+        log.info("Suspending membership for client {}", clientId);
+
+        Membership membership = membershipRepository.findByClientId(clientId)
+            .orElseThrow(() -> new ResourceNotFoundException("No membership found for client ID: " + clientId));
+
+        membership.setStatus(Membership.MembershipStatus.SUSPENDED);
+        membershipRepository.save(membership);
+        log.info("Membership suspended for client {}", clientId);
+
+        // Publish suspension event
+        eventProducer.publishSuspensionEvent(clientId, membership.getPlan().getId(), 
+            membership.getPlan().getName(), null, null);
+    }
+
+    /**
+     * Deduct credits from membership
+     */
+    public void deductCredits(Long clientId, Integer creditsToDeduct, String description) {
+        Membership membership = membershipRepository.findByClientId(clientId)
+            .orElseThrow(() -> new ResourceNotFoundException("No membership found for client ID: " + clientId));
+
+        if (membership.getStatus() != Membership.MembershipStatus.ACTIVE) {
+            throw new BadRequestException("Cannot deduct credits from inactive membership");
+        }
+
+        if (membership.getCreditsRemaining() < creditsToDeduct) {
+            throw new BadRequestException("Insufficient credits. Required: " + creditsToDeduct +
+                ", Available: " + membership.getCreditsRemaining());
+        }
+
+        Integer balanceBefore = membership.getCreditsRemaining();
+        membership.setCreditsRemaining(balanceBefore - creditsToDeduct);
+        membership.setWashesUsedThisMonth(membership.getWashesUsedThisMonth() + 1);
+
+        membershipRepository.save(membership);
+
+        // Log the transaction
+        MembershipCreditLog log = MembershipCreditLog.builder()
+            .membership(membership)
+            .type(MembershipCreditLog.TransactionType.USAGE)
+            .creditsChanged(-creditsToDeduct)
+            .balanceBefore(balanceBefore)
+            .balanceAfter(membership.getCreditsRemaining())
+            .description(description)
+            .build();
+
+        creditLogRepository.save(log);
+    }
+
+    /**
+     * Add credits to membership (e.g., purchase additional credits)
+     */
+    public void addCredits(Long clientId, Integer creditsToAdd, String description) {
+        Membership membership = membershipRepository.findByClientId(clientId)
+            .orElseThrow(() -> new ResourceNotFoundException("No membership found for client ID: " + clientId));
+
+        Integer balanceBefore = membership.getCreditsRemaining();
+        membership.setCreditsRemaining(balanceBefore + creditsToAdd);
+
+        membershipRepository.save(membership);
+
+        // Log the transaction
+        MembershipCreditLog log = MembershipCreditLog.builder()
+            .membership(membership)
+            .type(MembershipCreditLog.TransactionType.PURCHASE)
+            .creditsChanged(creditsToAdd)
+            .balanceBefore(balanceBefore)
+            .balanceAfter(membership.getCreditsRemaining())
+            .description(description)
+            .build();
+
+        creditLogRepository.save(log);
+    }
+
+    /**
+     * Get total active memberships count
+     */
+    @Transactional(readOnly = true)
+    public Long getTotalActiveMemberships() {
+        return membershipRepository.countActiveMemberships();
+    }
+
+    /**
+     * Get active memberships count for a specific plan
+     */
+    @Transactional(readOnly = true)
+    public Long getActiveMembershipsForPlan(Long planId) {
+        return membershipRepository.countActiveByPlan(planId);
+    }
+
+    private MembershipDetailResponse mapToDetailResponse(Membership membership) {
+        LocalDateTime now = LocalDateTime.now();
+        boolean isExpired = membership.getExpiryDate().isBefore(now);
+        long daysUntilExpiry = ChronoUnit.DAYS.between(now, membership.getExpiryDate());
+
+        MembershipPlanResponse planResponse = MembershipPlanResponse.builder()
+            .id(membership.getPlan().getId())
+            .name(membership.getPlan().getName())
+            .description(membership.getPlan().getDescription())
+            .monthlyPrice(membership.getPlan().getMonthlyPrice())
+            .creditsPerMonth(membership.getPlan().getCreditsPerMonth())
+            .freeWashes(membership.getPlan().getFreeWashes())
+            .isActive(membership.getPlan().getIsActive())
+            .discountEligible(membership.getPlan().getDiscountEligible())
+            .discountPercentage(membership.getPlan().getDiscountPercentage())
+            .createdAt(membership.getPlan().getCreatedAt())
+            .updatedAt(membership.getPlan().getUpdatedAt())
+            .build();
+
+        return MembershipDetailResponse.builder()
+            .id(membership.getId())
+            .clientId(membership.getClientId())
+            .plan(planResponse)
+            .status(membership.getStatus().toString())
+            .startDate(membership.getStartDate())
+            .expiryDate(membership.getExpiryDate())
+            .creditsRemaining(membership.getCreditsRemaining())
+            .washesUsedThisMonth(membership.getWashesUsedThisMonth())
+            .autoRenew(membership.getAutoRenew())
+            .isExpired(isExpired)
+            .daysUntilExpiry((int) daysUntilExpiry)
+            .createdAt(membership.getCreatedAt())
+            .updatedAt(membership.getUpdatedAt())
+            .build();
+    }
+}

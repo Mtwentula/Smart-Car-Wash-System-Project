@@ -1,0 +1,31 @@
+spring:
+  application:
+    name: booking-service
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    show-sql: false
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/int216d_carwash}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+  flyway:
+    schemas: booking_schema
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    default-schema: booking_schema
+
+server:
+  port: 8083
+  servlet:
+    context-path: /api/v1
+
+logging:
+  level:
+    za.co.int216d: DEBUG
+    org.springframework.security: DEBUG
+    org.hibernate.SQL: DEBUG
